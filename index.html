@@ -886,6 +886,59 @@
             }
         };
 
+        const ANGLE_CATALOG = [15, 30, 36, 45, 54, 60, 72, 75, 90, 105, 108, 120, 135, 144, 150, 165, 180];
+        const ANGLE_WEIGHTS = new Map([
+            [36, 3], [54, 3], [72, 3], [108, 3], [144, 3],
+            [15, 2], [30, 2], [45, 2], [60, 2], [75, 2], [105, 2], [120, 2], [135, 2], [150, 2], [165, 2],
+            [90, 1], [180, 1]
+        ]);
+        const ANGLE_VALUES = ANGLE_CATALOG.slice();
+        const ANGLE_WEIGHT_VECTOR = ANGLE_VALUES.map(angle => ANGLE_WEIGHTS.get(angle) || 1);
+
+        function sampleAngle(rng) {
+            if (!rng || typeof rng.weightedChoice !== 'function') {
+                const total = ANGLE_WEIGHT_VECTOR.reduce((sum, value) => sum + value, 0);
+                let pick = Math.random() * total;
+                for (let i = 0; i < ANGLE_VALUES.length; i++) {
+                    pick -= ANGLE_WEIGHT_VECTOR[i];
+                    if (pick <= 0) {
+                        return ANGLE_VALUES[i];
+                    }
+                }
+                return ANGLE_VALUES[ANGLE_VALUES.length - 1];
+            }
+            return rng.weightedChoice(ANGLE_VALUES, ANGLE_WEIGHT_VECTOR);
+        }
+
+        const Sanitizer = {
+            enforce(text) {
+                if (!text) return text;
+                let t = text
+                    .replace(/\babout\b/gi, '')
+                    .replace(/\bexactly\b/gi, '')
+                    .replace(/\bopposite\b/gi, 'inverted')
+                    .replace(/\s+/g, ' ')
+                    .trim();
+                t = t.replace(/\b([a-z])\b/g, (match, letter) => letter.toUpperCase());
+                const tokens = t.length === 0 ? [] : t.split(' ');
+                if (tokens.length > 7) {
+                    throw new Error('Token budget exceeded');
+                }
+                return t;
+            }
+        };
+
+        function textEquals(a, b) {
+            if (!a || !b) return false;
+            const normalize = (value) => value.replace(/\s+/g, ' ').trim().toLowerCase();
+            return normalize(a) === normalize(b);
+        }
+
+        function replicatesAny(candidate, windowTexts) {
+            if (!candidate || !Array.isArray(windowTexts)) return false;
+            return windowTexts.some(text => textEquals(candidate, text));
+        }
+
         const NUM_TRIALS_KEY = 'numTrials';
         const LISTEN_ONLY_KEY = 'listenOnly';
         const numTrialsInput = document.getElementById('numTrialsInput');
@@ -1192,10 +1245,10 @@
                   mapping:[["D","Candle"],["C","Lantern"]],
                   rationale:"East is same-role/sibling; Lantern parallels Candle."
                 },
-                { id:4, level:"single", theme:"Order/Chaos — Opposite",
+                { id:4, level:"single", theme:"Order/Chaos — Inverted",
                   premise:"E is west of F.",
                   anchors:[["F","Order"]],
-                  transforms:["West(F→E): opposite of Order → Chaos"],
+                  transforms:["West(F→E): inverted of Order → Chaos"],
                   mapping:[["F","Order"],["E","Chaos"]],
                   rationale:"West is counterpart; Chaos opposes Order."
                 },
@@ -1220,7 +1273,7 @@
                   mapping:[["M","Map"],["L","Chart"]],
                   rationale:"Chart is a sibling format to Map."
                 },
-                { id:8, level:"single", theme:"Emotion — Opposite",
+                { id:8, level:"single", theme:"Emotion — Inverted",
                   premise:"P is west of O.",
                   anchors:[["O","Calm"]],
                   transforms:["West(O→P): Calm → Agitation"],
@@ -1971,6 +2024,7 @@
                     return a.tail.localeCompare(b.tail);
                 });
                 this.features = this.computeFeatures();
+                this._sanitizedText = null;
             }
 
             getLetters() {
@@ -2039,6 +2093,13 @@
 
             toNaturalSpeech() {
                 return this.atoms.map(atom => `${atom.head} is ${RELATION_WORDS[atom.axis]} ${atom.tail}`).join('; ') + '.';
+            }
+
+            getSanitizedText() {
+                if (this._sanitizedText === null) {
+                    this._sanitizedText = Sanitizer.enforce(this.toNaturalSpeech());
+                }
+                return this._sanitizedText;
             }
 
             mirrorKey() {
@@ -2565,33 +2626,39 @@
 
             computeCertificate(nBackPremise, candidatePremise, midAtoms, windowAtoms = []) {
                 if (!nBackPremise) {
-                    return { match: false, reason: 'no-nback' };
+                    return { match: false, reason: 'no-nback', certificate: null, midWindowDerivable: false };
                 }
 
                 if (nBackPremise.toKey() === candidatePremise.toKey()) {
-                    return { match: false, reason: 'identity' };
+                    return { match: false, reason: 'identity', certificate: null, midWindowDerivable: false };
                 }
 
                 const result = this.Equivalent(nBackPremise, candidatePremise, windowAtoms, midAtoms || []);
                 if (!result.ok) {
-                    const response = { match: false, reason: result.reason };
                     if (result.reason === 'mid-window-derivable' || result.midWindowDerivable) {
-                        response.midWindowDerivable = true;
-                        if (this.transitivityEnabled) {
-                            return {
-                                match: true,
-                                certificate: {
-                                    type: 'invertible',
-                                    mapping: result.mapping || [],
-                                    sharedLetters: result.sharedLetters || [],
-                                    parity: true,
-                                    midWindowDerivable: true
-                                },
-                                midWindowDerivable: true
-                            };
-                        }
+                        const certificate = {
+                            type: 'derived',
+                            mapping: result.mapping || [],
+                            sharedLetters: result.sharedLetters || [],
+                            parity: true,
+                            midWindowDerivable: true,
+                            ok: true,
+                            derived: true
+                        };
+                        return { match: true, certificate, midWindowDerivable: true };
                     }
-                    return response;
+                    return {
+                        match: false,
+                        reason: result.reason,
+                        certificate: {
+                            ok: false,
+                            derived: false,
+                            midWindowDerivable: Boolean(result.midWindowDerivable),
+                            mapping: result.mapping || [],
+                            sharedLetters: result.sharedLetters || []
+                        },
+                        midWindowDerivable: Boolean(result.midWindowDerivable)
+                    };
                 }
 
                 const certificate = {
@@ -2599,7 +2666,9 @@
                     mapping: result.mapping,
                     sharedLetters: result.sharedLetters,
                     parity: true,
-                    midWindowDerivable: false
+                    midWindowDerivable: false,
+                    ok: true,
+                    derived: false
                 };
 
                 return { match: true, certificate, midWindowDerivable: false };
@@ -2820,6 +2889,20 @@
                     .flatMap(entry => entry.atoms);
             }
 
+            getWindowSanitizedTexts() {
+                const cutoff = Math.max(0, this.currentStep - this.windowSize);
+                return this.premiseHistory
+                    .filter(entry => entry.step >= cutoff)
+                    .map(entry => {
+                        if (entry.sanitizedText) {
+                            return entry.sanitizedText;
+                        }
+                        const text = entry.premise.getSanitizedText();
+                        entry.sanitizedText = text;
+                        return text;
+                    });
+            }
+
             getConstraintsInRange(start, end) {
                 return this.constraintStore
                     .filter(entry => entry.step >= start && entry.step <= end)
@@ -2842,8 +2925,9 @@
             }
 
             recordPremise(premise, atoms, metadata) {
+                const sanitizedText = premise.getSanitizedText();
                 this.constraintStore.push({ step: this.currentStep, atoms });
-                this.premiseHistory.push({ step: this.currentStep, premise, metadata });
+                this.premiseHistory.push({ step: this.currentStep, premise, metadata, sanitizedText });
                 this.currentStep += 1;
 
                 const cutoff = this.currentStep - this.windowSize;
@@ -2902,6 +2986,7 @@
                 } = options;
 
                 const windowAtoms = this.state.getWindowAtoms();
+                const windowTexts = this.state.getWindowSanitizedTexts();
                 let bestCandidate = null;
                 let attempts = 0;
                 let expanded = false;
@@ -2972,6 +3057,16 @@
                     }
 
                     const premise = candidatePremise;
+                    let sanitizedText;
+                    try {
+                        sanitizedText = premise.getSanitizedText();
+                    } catch (error) {
+                        continue;
+                    }
+
+                    if (replicatesAny(sanitizedText, windowTexts)) {
+                        continue;
+                    }
                     const features = premise.getFeatures();
                     const signatures = this.state.novelty.buildSignatures(premise);
                     const novelty = this.state.novelty.evaluate(premise, signatures, trialIndex);
@@ -2990,14 +3085,17 @@
 
                     if (effectiveMatch) {
                         const equivalence = this.equivalence.computeCertificate(nBackPremise, premise, middleAtoms, windowAtoms);
-                        if (!equivalence.match) {
+                        if (!equivalence.certificate || equivalence.certificate.ok !== true || equivalence.certificate.derived !== true) {
                             continue;
                         }
                         certificate = equivalence.certificate;
-                        midDerivable = equivalence.midWindowDerivable;
+                        midDerivable = Boolean(equivalence.midWindowDerivable || equivalence.certificate.midWindowDerivable);
                     } else if (nBackPremise) {
                         const check = this.equivalence.computeCertificate(nBackPremise, premise, middleAtoms, windowAtoms);
-                        if (check.match) {
+                        if (check.certificate && check.certificate.ok === true && check.certificate.derived === true) {
+                            continue;
+                        }
+                        if (check.match && check.certificate && check.certificate.derived !== true) {
                             continue;
                         }
                     }
@@ -3015,7 +3113,8 @@
                             modeUsed,
                             features,
                             foilType,
-                            score
+                            score,
+                            sanitizedText
                         };
                     }
 
@@ -4293,6 +4392,7 @@
 
                 const { premise, signatures, novelty, satResult, certificate, modeUsed, features, foilType, planMatch } = result;
                 this.activePremise = premise;
+                const sanitizedText = premise.getSanitizedText();
                 const planType = planMatch ? 'match' : (foilType ? `foil:${foilType}` : 'nonmatch');
                 const featureSnapshot = features || premise.getFeatures();
 
@@ -4306,7 +4406,7 @@
                 if (premiseDisplay) {
                     premiseDisplay.textContent = premise.toString();
                 }
-                window.currentPremiseText = formatPremiseForSpeech(premise);
+                window.currentPremiseText = sanitizedText;
                 const matchBtn = document.getElementById('match-btn');
                 const noMatchBtn = document.getElementById('no-match-btn');
                 const repeatBtn = document.getElementById('repeat-btn');
@@ -4365,7 +4465,10 @@
                 const responseChoice = response?.type === 'answer' ? response.choice : null;
                 const timeout = response?.type === 'timeout';
                 const omission = timeout || responseChoice === null;
-                const actualMatch = Boolean(planMatch && certificate);
+                const windowTexts = this.state.getWindowSanitizedTexts();
+                const previousWindowTexts = windowTexts.length > 0 ? windowTexts.slice(0, -1) : [];
+                const replicated = replicatesAny(sanitizedText, previousWindowTexts);
+                const actualMatch = Boolean(planMatch && certificate?.derived === true && certificate?.ok === true && !replicated);
                 let correct = null;
                 if (!timeout && responseChoice !== null) {
                     correct = (responseChoice === 'match') === actualMatch;
@@ -4591,7 +4694,7 @@
 
         function formatPremiseForSpeech(premise) {
             if (!premise) return '';
-            return premise.atoms.map(atom => `${atom.head} is ${RELATION_WORDS[atom.axis]} ${atom.tail}`).join('; ') + '.';
+            return premise.getSanitizedText();
         }
 
         function estimateUtteranceMs(text, rate = 0.9) {
@@ -5463,9 +5566,46 @@
                 const cert = eq.computeCertificate(p1, p2, mid);
                 return {
                     test: 'Proof-based equivalence',
-                    passed: !cert.match,
-                    details: 'Mid-window derivable relation rejected when transitivity off'
+                    passed: cert.certificate?.derived === true && cert.certificate?.ok === true,
+                    details: 'Mid-window entailment recognized via derived certificate'
                 };
+            }
+        }
+
+        if (window.__DEV_DERIVED_ONLY__ === true) {
+            const seeded = (seed) => new Mulberry32(seed >>> 0);
+            const runAngleHistogram = (samples = 500) => {
+                const rng = seeded(123456);
+                const seen = new Set();
+                for (let i = 0; i < samples; i++) {
+                    seen.add(sampleAngle(rng));
+                }
+                return { distinct: seen.size };
+            };
+
+            try {
+                console.assert(runAngleHistogram(500).distinct >= 8, 'Angle diversity');
+
+                const tokenPremise = new Premise([new Atom('N', 'A', 'B')]);
+                console.assert(tokenPremise.getSanitizedText().split(' ').length <= 7, '≤7 tokens');
+
+                const eq = new EquivalenceEngine(false);
+                const windowAtoms = [
+                    new Atom('N', 'A', 'B'),
+                    new Atom('E', 'B', 'C'),
+                    new Atom('S', 'C', 'D')
+                ];
+                const duplicatePremise = new Premise([new Atom('N', 'A', 'B')]);
+                const certDup = eq.computeCertificate(duplicatePremise, duplicatePremise, [], windowAtoms);
+                console.assert(!(certDup.certificate?.derived && certDup.certificate?.ok), 'Replication is not a match');
+
+                const nBackPremise = new Premise([new Atom('N', 'A', 'B')]);
+                const candidatePremise = new Premise([new Atom('S', 'B', 'A')]);
+                const midAtoms = [new Atom('N', 'A', 'C'), new Atom('N', 'C', 'B')];
+                const certPass = eq.computeCertificate(nBackPremise, candidatePremise, midAtoms, midAtoms);
+                console.assert(certPass.certificate?.derived === true && certPass.certificate?.ok === true, 'Entailment is a match');
+            } catch (error) {
+                console.error('Derived-only dev checks failed', error);
             }
         }
 
